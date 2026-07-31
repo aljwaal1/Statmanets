@@ -1,9 +1,8 @@
 import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { processTrialBalance } from './services/trialBalanceEngine';
+import { CLASSIFICATIONS, buildFinancialStatements, normalize, processTrialBalance, recalculate } from './services/trialBalanceEngine';
 
-const money = value => new Intl.NumberFormat('ar', { maximumFractionDigits: 2 }).format(value || 0);
-
+const money = value => new Intl.NumberFormat('ar-JO', { maximumFractionDigits: 2 }).format(value || 0);
 const SAMPLE_ROWS = [
   { 'رقم الحساب': '101001', 'اسم الحساب': 'الصندوق', مدين: 15000, دائن: 0 },
   { 'رقم الحساب': '102001', 'اسم الحساب': 'البنك', مدين: 45000, دائن: 0 },
@@ -20,196 +19,132 @@ const SAMPLE_ROWS = [
   { 'رقم الحساب': '602001', 'اسم الحساب': 'مصروف الإيجار', مدين: 6000, دائن: 0 },
   { 'رقم الحساب': '603001', 'اسم الحساب': 'مصروف الكهرباء', مدين: 2000, دائن: 0 },
   { 'رقم الحساب': '604001', 'اسم الحساب': 'مصروف الإهلاك', مدين: 4000, دائن: 0 },
-  { 'رقم الحساب': '701001', 'اسم الحساب': 'مسحوبات المالك', مدين: 0, دائن: 17000 },
+  { 'رقم الحساب': '302001', 'اسم الحساب': 'أرباح محتجزة', مدين: 0, دائن: 4000 },
 ];
+const EMPTY_ROWS = Array.from({ length: 5 }, () => ({ 'رقم الحساب': '', 'اسم الحساب': '', مدين: '', دائن: '' }));
 
-const EMPTY_ROWS = [
-  { 'رقم الحساب': '', 'اسم الحساب': '', مدين: '', دائن: '' },
-  { 'رقم الحساب': '', 'اسم الحساب': '', مدين: '', دائن: '' },
-  { 'رقم الحساب': '', 'اسم الحساب': '', مدين: '', دائن: '' },
-  { 'رقم الحساب': '', 'اسم الحساب': '', مدين: '', دائن: '' },
-];
-
-const GUIDE_SECTIONS = [
-  { id: 'start', title: 'البداية السريعة', icon: '01', text: 'اكتب اسم الشركة، ثم ارفع ميزان المراجعة أو جرّب الملف الجاهز. سيقرأ التطبيق الحسابات ويعرض نتيجة الفحص والتصنيف مباشرة.' },
-  { id: 'prepare', title: 'تجهيز ملف Excel', icon: '02', text: 'ضع كل حساب في صف مستقل. يجب أن يحتوي الملف على اسم الحساب، ومعه مدين ودائن أو رصيد صافٍ. تجنب الخلايا المدمجة وكلمات المرور.' },
-  { id: 'columns', title: 'اكتشاف الأعمدة', icon: '03', text: 'يحاول التطبيق اكتشاف رقم الحساب واسمه والمدين والدائن تلقائيًا، حتى لو كانت أسماء الأعمدة بالعربية أو الإنجليزية.' },
-  { id: 'review', title: 'مراجعة التصنيف', icon: '04', text: 'راجع الحسابات ذات الثقة المنخفضة. لاحقًا سيتمكن المستخدم من تعديل التصنيف وحفظه للشركة كي يتعلم التطبيق منه.' },
-  { id: 'reports', title: 'إنشاء القوائم', icon: '05', text: 'بعد اعتماد التصنيف، ينشئ النظام قائمة المركز المالي وقائمة الدخل، ثم التدفقات النقدية عند توافر بيانات فترتين.' },
-];
-
-function makeWorkbook(rows, fileName, includeInstructions = true) {
-  const workbook = XLSX.utils.book_new();
-  const sheet = XLSX.utils.json_to_sheet(rows);
-  sheet['!cols'] = [{ wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 16 }];
-  XLSX.utils.book_append_sheet(workbook, sheet, 'ميزان المراجعة');
-
-  if (includeInstructions) {
-    const instructions = [
-      ['دليل تعبئة النموذج'],
-      ['1', 'اكتب كل حساب في صف مستقل.'],
-      ['2', 'لا تدمج الخلايا داخل جدول الحسابات.'],
-      ['3', 'أدخل المبالغ في عمود مدين أو دائن.'],
-      ['4', 'تأكد من تساوي إجمالي المدين والدائن.'],
-      ['5', 'يمكن استخدام مسميات عربية أو إنجليزية.'],
-    ];
-    const helpSheet = XLSX.utils.aoa_to_sheet(instructions);
-    helpSheet['!cols'] = [{ wch: 8 }, { wch: 70 }];
-    XLSX.utils.book_append_sheet(workbook, helpSheet, 'اقرأني أولًا');
-  }
-
-  XLSX.writeFile(workbook, fileName);
+function makeWorkbook(rows, fileName) {
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{ wch: 16 }, { wch: 34 }, { wch: 16 }, { wch: 16 }];
+  XLSX.utils.book_append_sheet(wb, ws, 'ميزان المراجعة');
+  const help = XLSX.utils.aoa_to_sheet([
+    ['دليل تعبئة النموذج'], ['1', 'اكتب كل حساب في صف مستقل.'], ['2', 'لا تدمج الخلايا داخل الجدول.'],
+    ['3', 'أدخل الرصيد في المدين أو الدائن.'], ['4', 'تأكد من تساوي الإجماليين.'], ['5', 'يمكن استخدام العربية أو الإنجليزية.'],
+  ]);
+  help['!cols'] = [{ wch: 8 }, { wch: 75 }];
+  XLSX.utils.book_append_sheet(wb, help, 'اقرأني أولًا');
+  XLSX.writeFile(wb, fileName);
 }
 
 export default function App() {
+  const [view, setView] = useState('home');
+  const [company, setCompany] = useState('شركة تجريبية');
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const [company, setCompany] = useState('شركة تجريبية');
-  const [view, setView] = useState('home');
-  const [guideId, setGuideId] = useState('start');
-  const [tourStep, setTourStep] = useState(() => localStorage.getItem('statmanets-tour-done') ? -1 : 0);
+  const [query, setQuery] = useState('');
+  const [activeTab, setActiveTab] = useState('review');
+  const [tour, setTour] = useState(() => localStorage.getItem('statmanets-tour-done') ? false : true);
 
-  const summary = useMemo(() => {
-    if (!result) return [];
-    return Object.entries(result.totals.bySection).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  const learned = useMemo(() => {
+    try { return JSON.parse(localStorage.getItem('statmanets-learned') || '{}'); } catch { return {}; }
   }, [result]);
 
+  const statements = useMemo(() => result ? buildFinancialStatements(result.accounts) : null, [result]);
+  const filtered = useMemo(() => !result ? [] : result.accounts.filter(a => `${a.name} ${a.code} ${a.label}`.toLowerCase().includes(query.toLowerCase())), [result, query]);
+
   function loadRows(rows, name = company) {
-    setError('');
     try {
-      const processed = processTrialBalance(rows);
-      setResult(processed);
-      setCompany(name);
-      setView('workspace');
-    } catch (e) {
-      setResult(null);
-      setError(e.message || 'تعذر تحليل البيانات.');
-    }
+      const processed = processTrialBalance(rows, learned);
+      setResult(processed); setCompany(name); setError(''); setView('workspace'); setActiveTab('review');
+    } catch (e) { setError(e.message || 'تعذر تحليل الملف.'); }
   }
 
   async function handleFile(event) {
-    setError('');
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-      if (!rows.length) throw new Error('الملف لا يحتوي على بيانات قابلة للقراءة.');
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
       loadRows(rows);
-    } catch (e) {
-      setResult(null);
-      setError(e.message || 'حدث خطأ أثناء قراءة الملف.');
-    }
+    } catch (e) { setError(e.message || 'حدث خطأ أثناء قراءة الملف.'); }
   }
 
-  function closeTour() {
-    localStorage.setItem('statmanets-tour-done', '1');
-    setTourStep(-1);
+  function changeClassification(accountId, section) {
+    const option = CLASSIFICATIONS.find(x => x.section === section);
+    if (!option || !result) return;
+    const accounts = result.accounts.map(a => a.id === accountId ? { ...a, ...option, confidence: 1, source: 'manual' } : a);
+    const account = accounts.find(a => a.id === accountId);
+    const memory = { ...learned, [normalize(`${account.code}|${account.name}`)]: section };
+    localStorage.setItem('statmanets-learned', JSON.stringify(memory));
+    setResult(recalculate(accounts, result.columns));
   }
 
-  const activeGuide = GUIDE_SECTIONS.find(item => item.id === guideId);
-  const tour = [
-    { title: 'مرحبًا بك في Statmanets', text: 'حوّل ميزان المراجعة إلى قوائم مالية منظمة من ملف Excel واحد.' },
-    { title: 'لا تحتاج إلى نموذج ثابت', text: 'يتعرف التطبيق على أسماء الأعمدة والحسابات العربية والإنجليزية.' },
-    { title: 'راجع قبل الاعتماد', text: 'يعرض التطبيق درجة الثقة ويبرز الحسابات التي تحتاج إلى مراجعة.' },
-    { title: 'ابدأ بالتجربة', text: 'استخدم الملف الجاهز الآن أو نزّل النموذج الفارغ واملأه ببيانات شركتك.' },
-  ];
+  function exportStatements() {
+    if (!statements) return;
+    const wb = XLSX.utils.book_new();
+    const income = statements.incomeStatement;
+    const incomeRows = [
+      ['قائمة الدخل', company], ['البند', 'المبلغ'], ['الإيرادات', income.revenue], ['تكلفة الإيرادات', income.cost],
+      ['مجمل الربح', income.grossProfit], ['المصروفات التشغيلية', income.expenses], ['بنود أخرى', income.other], ['صافي الربح', income.netProfit],
+    ];
+    const fp = statements.financialPosition;
+    const positionRows = [['قائمة المركز المالي', company], ['الأصول', 'المبلغ'], ...fp.assetLines.map(x => [x.label, x.amount]), ['إجمالي الأصول', fp.assets], [], ['الالتزامات', 'المبلغ'], ...fp.liabilityLines.map(x => [x.label, x.amount]), ['إجمالي الالتزامات', fp.liabilities], [], ['حقوق الملكية', 'المبلغ'], ...fp.equityLines.map(x => [x.label, x.amount]), ['صافي ربح الفترة', income.netProfit], ['إجمالي حقوق الملكية', fp.equityWithProfit], ['فرق المعادلة', fp.difference]];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(incomeRows), 'قائمة الدخل');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(positionRows), 'المركز المالي');
+    XLSX.writeFile(wb, `القوائم-المالية-${company}.xlsx`);
+  }
 
-  return (
-    <main className="app-shell">
-      <nav className="topbar">
-        <button className="brand" onClick={() => setView('home')}><span>S</span><b>Statmanets</b></button>
-        <div className="nav-actions">
-          <button className={view === 'home' ? 'active' : ''} onClick={() => setView('home')}>الرئيسية</button>
-          <button className={view === 'workspace' ? 'active' : ''} onClick={() => setView('workspace')}>مساحة العمل</button>
-          <button className={view === 'guide' ? 'active' : ''} onClick={() => setView('guide')}>دليل الاستخدام</button>
+  return <main className="app-shell">
+    <nav className="topbar">
+      <button className="brand" onClick={() => setView('home')}><span>S</span><b>Statmanets</b></button>
+      <div className="nav-actions">
+        <button onClick={() => setView('home')}>الرئيسية</button>
+        <button onClick={() => setView('workspace')}>مساحة العمل</button>
+        <button onClick={() => setView('guide')}>دليل الاستخدام</button>
+      </div>
+    </nav>
+
+    {view === 'home' && <>
+      <header className="hero landing-hero">
+        <div><span className="eyebrow">SMART FINANCIAL STATEMENTS</span><h1>من ميزان المراجعة إلى قوائم مالية قابلة للمراجعة</h1><p>ارفع Excel، صحح التصنيفات عند الحاجة، ثم أنشئ قائمة الدخل والمركز المالي واحفظهما في ملف جديد.</p>
+          <div className="hero-buttons"><button className="primary" onClick={() => setView('workspace')}>ابدأ بملفي</button><button className="secondary" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>تجربة مباشرة</button><button className="ghost" onClick={() => setView('guide')}>دليل الاستخدام</button></div>
         </div>
-      </nav>
+        <div className="hero-panel"><b>Excel</b><span>↓ اكتشاف الأعمدة</span><span>↓ تصنيف ومراجعة</span><strong>قائمة الدخل + المركز المالي</strong></div>
+      </header>
+      <section className="steps-section"><div className="section-head"><span>رحلة واضحة</span><h2>أربع مراحل حتى القوائم</h2></div><div className="steps-grid">
+        {['رفع الملف','فحص التوازن','مراجعة التصنيف','إنشاء القوائم'].map((x,i)=><article key={x}><i>0{i+1}</i><h3>{x}</h3><p>{['يدعم أسماء أعمدة عربية وإنجليزية.','يعرض المدين والدائن والفرق مباشرة.','يمكن تعديل كل حساب وحفظ القرار.','عرض وتصدير النتائج إلى Excel.'][i]}</p></article>)}
+      </div></section>
+      <section className="sample-section"><div><h2>ابدأ بملف جاهز</h2><p>اختبر النظام أو نزّل نموذجًا فارغًا لتعبئته.</p></div><div className="sample-actions"><button className="primary" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>تشغيل التجربة</button><button className="secondary" onClick={() => makeWorkbook(SAMPLE_ROWS,'ميزان-مراجعة-تجريبي.xlsx')}>تنزيل التجريبي</button><button className="secondary" onClick={() => makeWorkbook(EMPTY_ROWS,'نموذج-ميزان-مراجعة.xlsx')}>تنزيل نموذج فارغ</button></div></section>
+    </>}
 
-      {view === 'home' && (
-        <>
-          <header className="hero landing-hero">
-            <div>
-              <span className="eyebrow">FINANCIAL STATEMENTS, SIMPLIFIED</span>
-              <h1>أنشئ قوائمك المالية تلقائيًا من ميزان المراجعة</h1>
-              <p>ارفع ملف Excel، ودع التطبيق يكتشف الأعمدة ويصنف الحسابات ويكشف الفروقات، ثم راجع النتيجة قبل إعداد القوائم.</p>
-              <div className="hero-buttons">
-                <button className="primary" onClick={() => setView('workspace')}>ابدأ بملفي</button>
-                <button className="secondary" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>جرّب ملفًا تجريبيًا</button>
-                <button className="ghost" onClick={() => setView('guide')}>كيف أستخدم التطبيق؟</button>
-              </div>
-            </div>
-            <div className="hero-panel">
-              <div className="mini-file"><span>XLSX</span><b>ميزان المراجعة.xlsx</b><small>جاهز للتحليل</small></div>
-              <div className="flow-arrow">↓</div>
-              <div className="mini-result"><b>اكتشاف وتصنيف تلقائي</b><span>أصول · التزامات · إيرادات · مصروفات</span></div>
-            </div>
-          </header>
+    {view === 'guide' && <section className="guide-page"><div className="section-head"><span>MANUAL</span><h1>دليل الاستخدام</h1><p>1) جهّز ملف Excel. 2) ارفع الملف. 3) راجع الأعمدة والتوازن. 4) صحح الحسابات منخفضة الثقة. 5) افتح تبويب القوائم وصدّر النتيجة.</p></div><div className="guide-grid">
+      <article><h3>الملف المطلوب</h3><p>اسم الحساب إلزامي، ومعه مدين ودائن أو رصيد صافٍ. ضع كل حساب في صف مستقل وتجنب الخلايا المدمجة.</p></article>
+      <article><h3>التصنيف اليدوي</h3><p>اختر التصنيف الصحيح من القائمة بجانب الحساب. يحفظ التطبيق القرار محليًا ويستخدمه عند رفع الحساب نفسه لاحقًا.</p></article>
+      <article><h3>القوائم المالية</h3><p>قائمة الدخل والمركز المالي تتغيران مباشرة بعد كل تعديل، مع إظهار فرق المعادلة المحاسبية والحسابات غير المصنفة.</p></article>
+      <article><h3>الخصوصية</h3><p>تتم القراءة والحساب داخل الجهاز في هذه النسخة ولا يحتاج تحليل الملف إلى خادم خارجي.</p></article>
+    </div></section>}
 
-          <section className="steps-section">
-            <div className="section-head"><span>أربع خطوات فقط</span><h2>من ملف Excel إلى نتيجة واضحة</h2></div>
-            <div className="steps-grid">
-              {GUIDE_SECTIONS.slice(0, 4).map(item => <article key={item.id}><i>{item.icon}</i><h3>{item.title}</h3><p>{item.text}</p></article>)}
-            </div>
-          </section>
+    {view === 'workspace' && <section className="workspace">
+      <aside className="upload-card"><label>اسم الشركة</label><input value={company} onChange={e=>setCompany(e.target.value)}/><label className="drop-zone"><strong>رفع ميزان المراجعة</strong><span>XLSX أو XLS</span><input type="file" accept=".xlsx,.xls" onChange={handleFile}/></label><button className="primary wide" onClick={() => loadRows(SAMPLE_ROWS,'شركة الأفق التجارية')}>تشغيل الملف التجريبي</button><button className="secondary wide" onClick={() => makeWorkbook(EMPTY_ROWS,'نموذج-ميزان-مراجعة.xlsx')}>تنزيل النموذج</button>{error&&<div className="error">{error}</div>}</aside>
+      <section className="content-card">{!result ? <div className="empty-state"><div className="empty-icon">↥</div><h2>ارفع ملفًا أو شغّل التجربة</h2><p>سيظهر فحص الميزان والتصنيف والقوائم هنا.</p></div> : <>
+        <div className="report-head"><div><small>ملف الشركة</small><h2>{company}</h2></div><span className={result.balanced?'status ok':'status warn'}>{result.balanced?'الميزان متوازن':'يوجد فرق في الميزان'}</span></div>
+        <div className="kpis"><article><small>إجمالي المدين</small><b>{money(result.totals.debit)}</b></article><article><small>إجمالي الدائن</small><b>{money(result.totals.credit)}</b></article><article><small>الحسابات</small><b>{result.accounts.length}</b></article><article><small>غير مصنف</small><b>{statements.unmapped.length}</b></article></div>
+        <div className="tabs"><button className={activeTab==='review'?'active':''} onClick={()=>setActiveTab('review')}>مراجعة الحسابات</button><button className={activeTab==='statements'?'active':''} onClick={()=>setActiveTab('statements')}>القوائم المالية</button></div>
+        {activeTab==='review' ? <><div className="toolbar"><input placeholder="بحث عن حساب..." value={query} onChange={e=>setQuery(e.target.value)}/><span>{filtered.length} حساب</span></div><div className="table-wrap"><table><thead><tr><th>الحساب</th><th>التصنيف</th><th>الرصيد</th><th>الثقة</th></tr></thead><tbody>{filtered.map(a=><tr key={a.id} className={a.section==='unmapped'?'needs-review':''}><td><b>{a.name}</b><small>{a.code}</small></td><td><select value={a.section} onChange={e=>changeClassification(a.id,e.target.value)}>{CLASSIFICATIONS.map(x=><option key={x.section} value={x.section}>{x.label}</option>)}</select></td><td>{money(a.balance)}</td><td><span className={a.confidence>=.7?'confidence high':'confidence low'}>{Math.round(a.confidence*100)}%</span></td></tr>)}</tbody></table></div></> : <Statements statements={statements} company={company} exportStatements={exportStatements}/>} 
+      </>}</section>
+    </section>}
 
-          <section className="sample-section">
-            <div><span className="eyebrow dark">ابدأ دون تجهيز ملف</span><h2>جرّب التطبيق ببيانات جاهزة</h2><p>شاهد كيف يقرأ التطبيق ميزان مراجعة متوازنًا، ثم نزّل النموذج واستخدمه كنقطة بداية لشركتك.</p></div>
-            <div className="sample-actions">
-              <button className="primary" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>تشغيل الملف التجريبي</button>
-              <button className="secondary" onClick={() => makeWorkbook(SAMPLE_ROWS, 'ميزان-مراجعة-تجريبي.xlsx')}>تنزيل الملف التجريبي</button>
-              <button className="secondary" onClick={() => makeWorkbook(EMPTY_ROWS, 'نموذج-ميزان-مراجعة-فارغ.xlsx')}>تنزيل نموذج فارغ</button>
-            </div>
-          </section>
-        </>
-      )}
-
-      {view === 'guide' && (
-        <section className="guide-page">
-          <div className="guide-intro"><span className="eyebrow dark">MANUAL</span><h1>دليل استخدام التطبيق</h1><p>تعلم طريقة تجهيز ملفك ومراجعته وإعداد القوائم المالية خطوة بخطوة.</p></div>
-          <div className="guide-layout">
-            <aside className="guide-menu">
-              {GUIDE_SECTIONS.map(item => <button key={item.id} className={guideId === item.id ? 'active' : ''} onClick={() => setGuideId(item.id)}><span>{item.icon}</span>{item.title}</button>)}
-            </aside>
-            <article className="guide-content">
-              <span className="guide-number">{activeGuide.icon}</span>
-              <h2>{activeGuide.title}</h2>
-              <p>{activeGuide.text}</p>
-              {guideId === 'prepare' && <div className="checklist"><b>قبل رفع الملف تأكد من:</b><span>✓ اسم حساب واحد في كل صف</span><span>✓ وجود مدين ودائن أو رصيد</span><span>✓ عدم وجود خلايا مدمجة</span><span>✓ عدم حماية الملف بكلمة مرور</span></div>}
-              {guideId === 'start' && <div className="guide-buttons"><button className="primary" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>ابدأ بالتجربة</button><button className="secondary" onClick={() => makeWorkbook(EMPTY_ROWS, 'نموذج-ميزان-مراجعة-فارغ.xlsx')}>نزّل النموذج</button></div>}
-            </article>
-          </div>
-          <div className="faq"><h2>أسئلة شائعة</h2><details><summary>هل يجب استخدام نموذج محدد؟</summary><p>لا. يحاول التطبيق اكتشاف الأعمدة تلقائيًا، والنموذج المرفق مجرد وسيلة لتسهيل البداية.</p></details><details><summary>ماذا لو لم يتعرف التطبيق على حساب؟</summary><p>يظهر الحساب ضمن العناصر التي تحتاج إلى مراجعة، وسيضاف لاحقًا خيار تعديل التصنيف وحفظه.</p></details><details><summary>هل تعمل البيانات دون إنترنت؟</summary><p>التصميم مهيأ ليعمل محليًا، وتتم قراءة ملف Excel داخل الجهاز.</p></details></div>
-        </section>
-      )}
-
-      {view === 'workspace' && (
-        <section className="workspace-page">
-          <div className="workspace-title"><div><span className="eyebrow dark">WORKSPACE</span><h1>استيراد ميزان المراجعة</h1></div><button className="help-button" onClick={() => setView('guide')}>؟ دليل الاستخدام</button></div>
-          <section className="workspace">
-            <aside className="upload-card">
-              <label>اسم الشركة</label>
-              <input value={company} onChange={e => setCompany(e.target.value)} />
-              <label className="drop-zone"><strong>رفع ميزان المراجعة</strong><span>Excel: XLSX أو XLS</span><input type="file" accept=".xlsx,.xls" onChange={handleFile} /></label>
-              <button className="demo-inline" onClick={() => loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية')}>أو استخدم الملف التجريبي</button>
-              <div className="feature-list"><span>✓ اكتشاف الأعمدة تلقائيًا</span><span>✓ مسميات عربية وإنجليزية</span><span>✓ درجة ثقة لكل حساب</span><span>✓ كشف عدم توازن الميزان</span></div>
-              {error && <div className="error">{error}</div>}
-            </aside>
-
-            <section className="content-card">
-              {!result ? <div className="empty-state"><div className="empty-icon">↥</div><h2>ابدأ برفع الملف</h2><p>يجب أن يحتوي الملف على اسم الحساب، ومعه مدين ودائن أو عمود رصيد.</p><button className="secondary" onClick={() => makeWorkbook(EMPTY_ROWS, 'نموذج-ميزان-مراجعة-فارغ.xlsx')}>تنزيل نموذج Excel</button></div> : <>
-                <div className="report-head"><div><small>ملف الشركة</small><h2>{company}</h2></div><span className={result.balanced ? 'status ok' : 'status warn'}>{result.balanced ? 'الميزان متوازن' : 'يوجد فرق في الميزان'}</span></div>
-                <div className="kpis"><article><small>إجمالي المدين</small><b>{money(result.totals.debit)}</b></article><article><small>إجمالي الدائن</small><b>{money(result.totals.credit)}</b></article><article><small>الحسابات</small><b>{result.accounts.length}</b></article><article><small>تحتاج مراجعة</small><b>{result.accounts.filter(a => a.confidence < .7).length}</b></article></div>
-                <h3>ملخص التصنيف</h3><div className="summary-grid">{summary.map(([section, value]) => <article key={section}><span>{section}</span><b>{money(value)}</b></article>)}</div>
-                <h3>مراجعة الحسابات</h3><div className="table-wrap"><table><thead><tr><th>الحساب</th><th>التصنيف</th><th>الرصيد</th><th>الثقة</th></tr></thead><tbody>{result.accounts.slice(0, 100).map(a => <tr key={a.id}><td><b>{a.name}</b><small>{a.code}</small></td><td>{a.label}</td><td>{money(a.balance)}</td><td><span className={a.confidence >= .7 ? 'confidence high' : 'confidence low'}>{Math.round(a.confidence * 100)}%</span></td></tr>)}</tbody></table></div>
-              </>}
-            </section>
-          </section>
-        </section>
-      )}
-
-      {tourStep >= 0 && <div className="tour-backdrop"><section className="tour-card"><div className="tour-progress">{tour.map((_, i) => <span key={i} className={i <= tourStep ? 'active' : ''} />)}</div><div className="tour-visual">{tourStep + 1}</div><h2>{tour[tourStep].title}</h2><p>{tour[tourStep].text}</p><div className="tour-actions"><button className="ghost" onClick={closeTour}>تخطي</button>{tourStep < tour.length - 1 ? <button className="primary" onClick={() => setTourStep(tourStep + 1)}>التالي</button> : <button className="primary" onClick={() => { closeTour(); loadRows(SAMPLE_ROWS, 'شركة الأفق التجارية'); }}>جرّب الآن</button>}</div></section></div>}
-    </main>
-  );
+    {tour && <div className="tour-overlay"><div className="tour-card"><span className="tour-badge">مرحبًا</span><h2>جرّب التطبيق خلال دقيقة</h2><p>شغّل الملف التجريبي، راجع التصنيفات، ثم افتح القوائم المالية وشاهد النتيجة.</p><div><button className="secondary" onClick={()=>{localStorage.setItem('statmanets-tour-done','1');setTour(false)}}>إغلاق</button><button className="primary" onClick={()=>{localStorage.setItem('statmanets-tour-done','1');setTour(false);loadRows(SAMPLE_ROWS,'شركة الأفق التجارية')}}>ابدأ التجربة</button></div></div></div>}
+  </main>;
 }
+
+function Statements({ statements, company, exportStatements }) {
+  const income = statements.incomeStatement; const fp = statements.financialPosition;
+  return <div className="statements"><div className="statement-actions"><div><small>القوائم المولدة</small><h3>{company}</h3></div><button className="primary" onClick={exportStatements}>تصدير إلى Excel</button></div>
+    {statements.unmapped.length>0&&<div className="warning-box">يوجد {statements.unmapped.length} حساب غير مصنف. راجعه للحصول على قوائم أدق.</div>}
+    <div className="statement-grid"><article className="statement-card"><h3>قائمة الدخل</h3><Line label="الإيرادات" value={income.revenue}/><Line label="تكلفة الإيرادات" value={income.cost}/><Line label="مجمل الربح" value={income.grossProfit} total/><Line label="المصروفات التشغيلية" value={income.expenses}/><Line label="بنود أخرى" value={income.other}/><Line label="صافي الربح" value={income.netProfit} grand/></article>
+    <article className="statement-card"><h3>قائمة المركز المالي</h3><h4>الأصول</h4>{fp.assetLines.map(x=><Line key={x.section} label={x.label} value={x.amount}/>)}<Line label="إجمالي الأصول" value={fp.assets} total/><h4>الالتزامات</h4>{fp.liabilityLines.map(x=><Line key={x.section} label={x.label} value={x.amount}/>)}<Line label="إجمالي الالتزامات" value={fp.liabilities} total/><h4>حقوق الملكية</h4>{fp.equityLines.map(x=><Line key={x.section} label={x.label} value={x.amount}/>)}<Line label="صافي ربح الفترة" value={income.netProfit}/><Line label="إجمالي حقوق الملكية" value={fp.equityWithProfit} total/><Line label="فرق المعادلة" value={fp.difference} grand/></article></div>
+  </div>;
+}
+function Line({label,value,total,grand}) { return <div className={`statement-line ${total?'total':''} ${grand?'grand':''}`}><span>{label}</span><b>{money(value)}</b></div>; }
