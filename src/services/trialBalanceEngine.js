@@ -30,6 +30,11 @@ const RULES = [
 
 export const normalize = value => String(value ?? '').toLowerCase().replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[^\p{L}\p{N}\s.-]/gu,' ').replace(/\s+/g,' ').trim();
 const number = value => { if (typeof value === 'number') return Number.isFinite(value) ? value : 0; const n = Number(String(value ?? '').replace(/,/g,'').replace(/\s/g,'')); return Number.isFinite(n) ? n : 0; };
+const isMostlyNumeric = values => {
+  const useful = values.filter(v => String(v ?? '').trim() !== '').slice(0, 20);
+  if (!useful.length) return false;
+  return useful.filter(v => /^[-+]?\d[\d,./-]*$/.test(String(v).trim())).length / useful.length >= 0.7;
+};
 
 export function classifyAccount(name, code='', learned={}) {
   const key = normalize(`${code}|${name}`);
@@ -40,8 +45,37 @@ export function classifyAccount(name, code='', learned={}) {
 }
 
 export function detectColumns(rows){
-  const keys=Object.keys(rows[0]||{}); const pick=terms=>keys.find(k=>terms.some(t=>normalize(k).includes(normalize(t))));
-  return { code:pick(['account code','code','رقم الحساب','رقم']), name:pick(['account name','name','description','اسم الحساب','البيان','الحساب']), debit:pick(['debit','مدين']), credit:pick(['credit','دائن']), balance:pick(['balance','net','الرصيد','صافي']) };
+  const keys = Object.keys(rows[0] || {});
+  const normalizedKeys = keys.map(key => ({ key, normalized: normalize(key) }));
+  const valuesFor = key => rows.slice(0, 20).map(row => row[key]);
+  const score = (key, exactTerms, partialTerms, preferText=false, preferNumeric=false) => {
+    const normalized = normalize(key);
+    let points = 0;
+    exactTerms.forEach(term => { if (normalized === normalize(term)) points += 100; });
+    partialTerms.forEach(term => { if (normalized.includes(normalize(term))) points += 20; });
+    const numeric = isMostlyNumeric(valuesFor(key));
+    if (preferText) points += numeric ? -45 : 25;
+    if (preferNumeric) points += numeric ? 25 : -20;
+    return points;
+  };
+  const best = (exact, partial, preferText=false, preferNumeric=false, excluded=[]) => normalizedKeys
+    .filter(item => !excluded.includes(item.key))
+    .map(item => ({ key:item.key, score:score(item.key,exact,partial,preferText,preferNumeric) }))
+    .filter(item => item.score > 0)
+    .sort((a,b) => b.score-a.score)[0]?.key;
+
+  const code = best(
+    ['رقم الحساب','كود الحساب','account code','account number','gl code','code'],
+    ['رقم','كود','code','number','no'], false, true
+  );
+  const name = best(
+    ['اسم الحساب','اسم البند','account name','account description','description','البيان','الحساب'],
+    ['اسم الحساب','اسم','description','account name','البيان'], true, false, code ? [code] : []
+  );
+  const debit = best(['مدين','debit','debit balance'],['مدين','debit'],false,true);
+  const credit = best(['دائن','credit','credit balance'],['دائن','credit'],false,true,debit?[debit]:[]);
+  const balance = best(['الرصيد','صافي الرصيد','balance','net balance'],['الرصيد','balance','net'],false,true,[debit,credit].filter(Boolean));
+  return { code, name, debit, credit, balance };
 }
 
 export function recalculate(accounts,columns={}){
@@ -52,6 +86,7 @@ export function recalculate(accounts,columns={}){
 export function processTrialBalance(rows, learned={}, overrideColumns=null){
   const columns=overrideColumns||detectColumns(rows);
   if(!columns.name) throw new Error('تعذر اكتشاف عمود اسم الحساب. استخدم شاشة مطابقة الأعمدة.');
+  if(columns.name === columns.code) throw new Error('تم اختيار العمود نفسه لرقم الحساب واسم الحساب. افتح مطابقة الأعمدة وحدد عمود الاسم الصحيح.');
   if(!columns.balance&&!columns.debit&&!columns.credit) throw new Error('حدد عمود الرصيد أو أعمدة المدين والدائن.');
   const accounts=rows.map((row,index)=>{ const debit=number(columns.debit?row[columns.debit]:0); const credit=number(columns.credit?row[columns.credit]:0); const balance=columns.balance?number(row[columns.balance]):debit-credit; const name=String(row[columns.name]??'').trim(); const code=columns.code?String(row[columns.code]??'').trim():''; return {id:index+1,code,name,debit,credit,balance,...classifyAccount(name,code,learned)}; }).filter(a=>a.name&&(a.debit||a.credit||a.balance));
   if(!accounts.length) throw new Error('لم يتم العثور على حسابات ذات أرصدة داخل الملف.');
